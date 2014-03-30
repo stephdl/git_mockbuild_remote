@@ -1,6 +1,8 @@
 #!/bin/bash
-
-# Who is the build asker and where is the build	server
+##############################################################################################
+## a big thank to daniel berteaud from firewall-service who wrote this script
+## the purpose of this script is to create a targ.gz from the GIT folder in order to build a rpm
+##############################################################################################
 # You have to adapt to your configuration
 # the connexion will be initiated 'ssh $ME@$BUILD'
 
