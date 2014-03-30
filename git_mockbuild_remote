@@ -1,0 +1,121 @@
+#!/bin/bash
+
+# Who is the build asker and where is the build	server
+# You have to adapt to your configuration
+# the connexion will be initiated 'ssh $ME@$BUILD'
+
+#ME=my_name
+ME=$(whoami)
+SERVER=build
+
+#====do_not_modify_below====#
+
+# What is the package name
+# The package name is given by the name of the main folder
+PACKAGE=$(basename $(pwd))
+
+# Informations needed from the spec file
+VERSION=$(rpm -q --qf "%{version}\n" --specfile $PACKAGE.spec | head -1)
+ARCH=$(rpm -q --qf "%{arch}\n" --specfile $PACKAGE.spec | head -1)
+RELEASE=$(rpm -q --qf "%{release}\n" --specfile $PACKAGE.spec | head -1)
+
+# Which git branch we are talking
+BRANCH=$(git branch | grep '*' | cut -d' ' -f2)
+
+# Find the centos version
+DIST=$1
+if [[ -z $DIST && "$BRANCH" == "sme9" ]]; then
+    DIST="el6"
+elif [ -z $DIST ]; then
+    DIST="el5"
+fi
+
+# Create a tmp folder in /tmp
+TMPDIR=$(mktemp -d)
+mkdir -p $TMPDIR/$PACKAGE-$VERSION/
+
+SOCKET=$(mktemp -u)
+
+# Open master SSH socket
+ssh -M -f -N -o ControlPath=$SOCKET -l $ME $SERVER
+
+# Tag GIT using the version in the spec file
+TAG=$VERSION"_"$DIST
+git tag -f $TAG 2>&1 > /dev/null
+
+# Create needed dirs on the build box
+ssh -o ControlPath=$SOCKET -l $ME $SERVER mkdir -p rpmbuild/{RPMS,SRPMS,SPECS,SOURCES}
+ssh -o ControlPath=$SOCKET -l $ME $SERVER mkdir -p exchange
+
+
+# Generate a tgz archive from the repo
+git archive --format=tar --prefix=$PACKAGE-$VERSION/ $BRANCH | tar xf - -C $TMPDIR
+
+# Generate ChangeLog
+git log --format=%H | git log --pretty --stdin --no-walk > $TMPDIR/$PACKAGE-$VERSION/CHANGELOG.git
+
+# Create the tar.gz archive and upload it to the build server
+#tar cz -C $TMPDIR $PACKAGE-$VERSION | ssh -l $ME build.firewall-services.com "cat > rpmbuild/SOURCES/$PACKAGE-$VERSION.tar.gz"
+tar czf $TMPDIR/$PACKAGE-$VERSION.tar.gz -C $TMPDIR $PACKAGE-$VERSION
+
+# Upload the spec file and tar.gz
+echo ""
+echo "1.Upload files"
+echo ""
+scp -o ControlPath=$SOCKET -C $TMPDIR/$PACKAGE-$VERSION.tar.gz $ME@$SERVER:rpmbuild/SOURCES/$PACKAGE-$VERSION.tar.gz
+scp -o ControlPath=$SOCKET $PACKAGE.spec $ME@$SERVER:rpmbuild/SPECS/
+
+# And build
+echo ""
+echo "2.Build the src.rpm"
+echo ""
+ssh -o ControlPath=$SOCKET -l $ME $SERVER cd ~/rpmbuild/SOURCES/  
+ssh -o ControlPath=$SOCKET -l $ME $SERVER tar -xvf rpmbuild/SOURCES/$PACKAGE-$VERSION.tar.gz 2>&1 > /dev/null
+ssh -o ControlPath=$SOCKET -l $ME $SERVER rpmbuild -bs --nodeps rpmbuild/SPECS/$PACKAGE.spec
+echo ""
+echo "3.Build with Mock"
+echo ""
+echo "=============================================================="
+echo "The build RPM architecture is $ARCH" 
+echo "The Target CentOS version is $DIST"
+
+if [[ $ARCH == "noarch" && "$DIST" == "el5" ]]; then
+    MOCKCONF="smeserver-8-i386-base"
+elif [[ $ARCH == "i386" && "$DIST" == "el5" ]]; then
+    MOCKCONF="smeserver-8-i386-base"
+elif [[ $ARCH == "x86_64" && "$DIST" == "el5" ]]; then
+    MOCKCONF="smeserver-8-x86_64-base"
+elif [[ $ARCH == "noarch" && "$DIST" == "el6" ]]; then
+    MOCKCONF="smeserver-9-i386-base"
+elif [[ $ARCH == "i386" && "$DIST" == "el6" ]]; then
+    MOCKCONF="smeserver-9-i386-base"
+elif [[ $ARCH == "x86_64" && "$DIST" == "el6" ]]; then
+    MOCKCONF="smeserver-9-x86_64-base"
+fi
+
+echo "the mock chroot configuration is  $MOCKCONF"
+echo "=============================================================="
+echo ""
+#mock -r $MOCKCONF --rebuild /home/build/rpmbuild/SRPMS/$PACKAGE-$VERSION-*.src.rpm --resultdir=/home/build/exchange/$PACKAGE-$VERSION.$DIST.$ARCH
+ssh -o ControlPath=$SOCKET -l $ME $SERVER mock -r $MOCKCONF --rebuild rpmbuild/SRPMS/$PACKAGE-$VERSION-*.src.rpm --resultdir=exchange/$PACKAGE-$VERSION.$DIST.$ARCH
+
+
+#ssh -o ControlPath=$SOCKET -l $ME $SERVER buildrpm rpmbuild/SRPMS/$PACKAGE-$VERSION-*.src.rpm $DIST
+ssh -o ControlPath=$SOCKET -l $ME $SERVER rm -f  rpmbuild/SPECS/$PACKAGE.spec rpmbuild/SOURCES/$PACKAGE-$VERSION.tar.gz rpmbuild/SRPMS/$PACKAGE-$VERSION*.src.rpm
+rm -rf $TMPDIR  ~/$PACKAGE-$VERSION 
+
+echo ""
+echo "================================================================================="
+echo "RPMS are in /home/$ME/exchange/$PACKAGE-$VERSION.$DIST.$ARCH of your build server"
+echo ""
+ssh -o ControlPath=$SOCKET -l $ME $SERVER ls /home/$ME/exchange/$PACKAGE-$VERSION.$DIST.$ARCH/*.rpm
+echo "================================================================================="
+echo ""
+echo "=============="
+echo "Sign your rpms"
+echo "=============="
+
+ssh $ME@$SERVER rpm --resign /home/$ME/exchange/$PACKAGE-$VERSION.$DIST.$ARCH/*.rpm
+#rpm --resign /home/$ME/exchange/$PACKAGE-$VERSION.$DIST.$ARCH/*.rpm
+# Close master SSH connexion
+ssh -S $SOCKET -O exit -l $ME $SERVER
